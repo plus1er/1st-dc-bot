@@ -241,4 +241,28 @@ async def translate(interaction: discord.Interaction, text: str, target: str):
     except Exception as e:
         await interaction.response.send_message(f"Error: {e}")
 
+# ---------- IP Geolocator ----------
+import aiohttp
+
+@bot.tree.command(name="iplookup", description="Get geolocation info for an IP")
+@app_commands.describe(ip="IP address to look up")
+async def iplookup(interaction: discord.Interaction, ip: str):
+    await interaction.response.defer()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://ip-api.com/json/{ip}") as resp:
+            data = await resp.json()
+
+    if data.get("status") == "fail":
+        await interaction.followup.send(f"Lookup failed: {data.get('message')}")
+        return
+
+    embed = discord.Embed(title=f"IP Lookup: {ip}")
+    embed.add_field(name="Country", value=data.get("country"), inline=True)
+    embed.add_field(name="Region", value=data.get("regionName"), inline=True)
+    embed.add_field(name="City", value=data.get("city"), inline=True)
+    embed.add_field(name="ISP", value=data.get("isp"), inline=True)
+    embed.add_field(name="Timezone", value=data.get("timezone"), inline=True)
+    embed.add_field(name="Coordinates", value=f"{data.get('lat')}, {data.get('lon')}", inline=True)
+    await interaction.followup.send(embed=embed)
+
 bot.run(TOKEN)
