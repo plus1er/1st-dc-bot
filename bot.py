@@ -6,8 +6,6 @@ import random
 import asyncio
 from datetime import datetime, timedelta
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"  # put in .env for real use
-
 intents = discord.Intents.default()
 intents.message_content = True
 
