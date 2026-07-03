@@ -5,6 +5,9 @@ import sqlite3
 import random
 import asyncio
 from datetime import datetime, timedelta
+import os
+
+TOKEN = os.environ.get("TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
