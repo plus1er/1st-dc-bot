@@ -6,7 +6,6 @@ import sqlite3
 import random
 import asyncio
 from datetime import datetime, timedelta
-import os
 
 TOKEN = os.environ.get("TOKEN")
 
@@ -229,5 +228,17 @@ async def mod_error(interaction: discord.Interaction, error):
         await interaction.response.send_message("You don't have permission for this.", ephemeral=True)
     else:
         raise error
+
+# ---------- Translator ----------
+from deep_translator import GoogleTranslator
+
+@bot.tree.command(name="translate", description="Translate text")
+@app_commands.describe(text="Text to translate", target="Target language code (e.g. en, es, fr)")
+async def translate(interaction: discord.Interaction, text: str, target: str):
+    try:
+        result = GoogleTranslator(source="auto", target=target).translate(text)
+        await interaction.response.send_message(f"**Translated:** {result}")
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}")
 
 bot.run(TOKEN)
