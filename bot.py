@@ -1,3 +1,4 @@
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta
 import os
 
 TOKEN = os.environ.get("TOKEN")
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -106,6 +108,7 @@ YDL_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
+    "cookiefile": "cookies.txt",
 }
 FFMPEG_OPTS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -135,7 +138,7 @@ async def play(interaction: discord.Interaction, query: str):
     vc = interaction.guild.voice_client
 
     with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-        info = ydl.extract_info(f"ytsearch:{query}", download=False)["entries"][0]
+        info = ydl.extract_info(f"scsearch:{query}", download=False)["entries"][0]
         url = info["url"]
         title = info["title"]
 
