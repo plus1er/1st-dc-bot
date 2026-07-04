@@ -26,6 +26,8 @@ TOKEN = os.environ.get("TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
+intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -279,5 +281,64 @@ async def iplookup(interaction: discord.Interaction, ip: str):
     embed.add_field(name="Timezone", value=data.get("timezone"), inline=True)
     embed.add_field(name="Coordinates", value=f"{data.get('lat')}, {data.get('lon')}", inline=True)
     await interaction.followup.send(embed=embed)
+
+# ---------- Fun Meter ----------
+@bot.tree.command(name="gaymeter", description="Random percent meter")
+async def gaymeter(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    percent = random.randint(0, 100)
+    await interaction.response.send_message(f"{target.mention} is {percent}% 🏳️‍🌈")
+
+# ---------- Reaction Roles ----------
+c.execute("""CREATE TABLE IF NOT EXISTS reaction_roles (
+    message_id INTEGER,
+    emoji TEXT,
+    role_id INTEGER
+)""")
+conn.commit()
+
+@bot.tree.command(name="reactionrole", description="Set up a reaction role message")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.describe(message_id="ID of the message", emoji="Emoji to react with", role="Role to assign")
+async def reactionrole(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
+    channel = interaction.channel
+    try:
+        msg = await channel.fetch_message(int(message_id))
+    except discord.NotFound:
+        await interaction.response.send_message("Message not found in this channel.", ephemeral=True)
+        return
+
+    await msg.add_reaction(emoji)
+    c.execute("INSERT INTO reaction_roles VALUES (?, ?, ?)", (msg.id, emoji, role.id))
+    conn.commit()
+    await interaction.response.send_message(f"Reacting with {emoji} on that message now gives {role.mention}.", ephemeral=True)
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.member is None or payload.member.bot:
+        return
+    c.execute("SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?",
+              (payload.message_id, str(payload.emoji)))
+    row = c.fetchone()
+    if row:
+        role = payload.member.guild.get_role(row[0])
+        if role:
+            await payload.member.add_roles(role)
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    member = guild.get_member(payload.user_id)
+    if member is None or member.bot:
+        return
+    c.execute("SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?",
+              (payload.message_id, str(payload.emoji)))
+    row = c.fetchone()
+    if row:
+        role = guild.get_role(row[0])
+        if role:
+            await member.remove_roles(role)
 
 bot.run(TOKEN)
