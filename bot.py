@@ -1,5 +1,7 @@
 import os
 import threading
+import time
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class Handler(BaseHTTPRequestHandler):
@@ -20,10 +22,9 @@ threading.Thread(target=run_server, daemon=True).start()
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import sqlite3
 import random
-import asyncio
 from datetime import datetime, timedelta
 
 TOKEN = os.environ.get("TOKEN")
@@ -49,6 +50,11 @@ c.execute("""CREATE TABLE IF NOT EXISTS warnings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     reason TEXT
+)""")
+c.execute("""CREATE TABLE IF NOT EXISTS reaction_roles (
+    message_id INTEGER,
+    emoji TEXT,
+    role_id INTEGER
 )""")
 conn.commit()
 
@@ -107,8 +113,6 @@ async def poll(interaction: discord.Interaction, question: str):
     await msg.add_reaction("👎")
 
 # ---------- Background task ----------
-from discord.ext import tasks
-
 @tasks.loop(seconds=30)
 async def check_reminders():
     now = datetime.utcnow().isoformat()
@@ -135,6 +139,94 @@ FFMPEG_OPTS = {
     "options": "-vn",
 }
 
+# guild_id -> {"title", "thumbnail", "duration", "start_time", "message", "update_task"}
+now_playing = {}
+
+def format_time(seconds):
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+def make_progress_bar(elapsed, duration, length=20):
+    if not duration or duration <= 0:
+        return "🔴 Live / unknown length"
+    ratio = min(elapsed / duration, 1.0)
+    filled = int(length * ratio)
+    bar = "▬" * filled + "🔘" + "▬" * (length - filled - 1) if filled < length else "▬" * length + "🔘"
+    return f"{bar}\n{format_time(elapsed)} / {format_time(duration)}"
+
+def make_now_playing_embed(guild_id):
+    data = now_playing.get(guild_id)
+    if not data:
+        return discord.Embed(title="Nothing playing")
+    elapsed = time.time() - data["start_time"]
+    embed = discord.Embed(
+        title="🎵 Now Playing",
+        description=f"**{data['title']}**\n\n{make_progress_bar(elapsed, data['duration'])}",
+        color=discord.Color.blurple()
+    )
+    if data.get("thumbnail"):
+        embed.set_thumbnail(url=data["thumbnail"])
+    return embed
+
+class MusicControls(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="⏯ Pause/Resume", style=discord.ButtonStyle.primary)
+    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc is None:
+            await interaction.response.send_message("Not connected.", ephemeral=True)
+            return
+        if vc.is_playing():
+            vc.pause()
+            await interaction.response.send_message("Paused.", ephemeral=True)
+        elif vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("Resumed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Nothing playing.", ephemeral=True)
+
+    @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger)
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc and vc.is_playing():
+            vc.stop()
+        await stop_progress_updates(self.guild_id)
+        await interaction.response.send_message("Stopped.", ephemeral=True)
+
+async def progress_updater(guild_id):
+    """Edits the now-playing message every few seconds to move the progress bar."""
+    try:
+        while guild_id in now_playing:
+            data = now_playing[guild_id]
+            msg = data.get("message")
+            if msg is None:
+                await asyncio.sleep(5)
+                continue
+            embed = make_now_playing_embed(guild_id)
+            try:
+                await msg.edit(embed=embed)
+            except discord.HTTPException:
+                pass
+            # stop naturally once track duration passes
+            if data["duration"] and time.time() - data["start_time"] >= data["duration"]:
+                break
+            await asyncio.sleep(10)
+    except asyncio.CancelledError:
+        pass
+
+async def stop_progress_updates(guild_id):
+    data = now_playing.get(guild_id)
+    if data and data.get("update_task"):
+        data["update_task"].cancel()
+    now_playing.pop(guild_id, None)
+
 @bot.tree.command(name="join", description="Join your voice channel")
 async def join(interaction: discord.Interaction):
     if interaction.user.voice is None:
@@ -156,25 +248,45 @@ async def play(interaction: discord.Interaction, query: str):
         await interaction.user.voice.channel.connect()
 
     vc = interaction.guild.voice_client
+    guild_id = interaction.guild.id
 
     with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
         info = ydl.extract_info(f"scsearch:{query}", download=False)["entries"][0]
         url = info["url"]
         title = info["title"]
+        thumbnail = info.get("thumbnail")
+        duration = info.get("duration")  # seconds, may be None for live streams
 
-    source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTS)
-
+    # stop any previous track/updater for this guild
     if vc.is_playing():
         vc.stop()
+    await stop_progress_updates(guild_id)
 
+    source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTS)
     vc.play(source)
-    await interaction.followup.send(f"Now playing: {title}")
+
+    now_playing[guild_id] = {
+        "title": title,
+        "thumbnail": thumbnail,
+        "duration": duration,
+        "start_time": time.time(),
+        "message": None,
+        "update_task": None,
+    }
+
+    embed = make_now_playing_embed(guild_id)
+    view = MusicControls(guild_id)
+    await interaction.followup.send(embed=embed, view=view)
+    msg = await interaction.original_response()
+    now_playing[guild_id]["message"] = msg
+    now_playing[guild_id]["update_task"] = bot.loop.create_task(progress_updater(guild_id))
 
 @bot.tree.command(name="stop", description="Stop playback")
 async def stop(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.stop()
+        await stop_progress_updates(interaction.guild.id)
         await interaction.response.send_message("Stopped.")
     else:
         await interaction.response.send_message("Nothing is playing.")
@@ -183,6 +295,7 @@ async def stop(interaction: discord.Interaction):
 async def leave(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc:
+        await stop_progress_updates(interaction.guild.id)
         await vc.disconnect()
         await interaction.response.send_message("Left the voice channel.")
     else:
@@ -294,13 +407,6 @@ async def gaymeter(interaction: discord.Interaction, member: discord.Member = No
     await interaction.response.send_message(f"{target.mention} is {percent}% 🏳️‍🌈")
 
 # ---------- Reaction Roles ----------
-c.execute("""CREATE TABLE IF NOT EXISTS reaction_roles (
-    message_id INTEGER,
-    emoji TEXT,
-    role_id INTEGER
-)""")
-conn.commit()
-
 @bot.tree.command(name="reactionrole", description="Set up a reaction role message")
 @app_commands.checks.has_permissions(manage_roles=True)
 @app_commands.describe(message_id="ID of the message", emoji="Emoji to react with", role="Role to assign")
